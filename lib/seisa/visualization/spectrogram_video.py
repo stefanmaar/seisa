@@ -64,14 +64,29 @@ class SpectrogramVideo(object):
         # The animation figure.
         self.fig = None
 
+        # Parameters used for animation.
+        self.ax_width = None
+        self.n_frames = None
+        self.last_playhead_pos = 0
+
+        # The resolution of the figure.
+        self.resolution = None
+
         # The animation artists
         self.spec_line = None
         self.wf_line = None
         self.time_box = None
+        self.wf_full = None
         self.wf_progress = None
 
         # The animation framecounter.
         self.framecounter = 0
+
+        # Flag to indicate if the artists should be animated.
+        self.animate = True
+
+        # The rendering frame cache.
+        self.cache = None
 
         # The animation frame times of the original trace.
         self.frame_times = None
@@ -95,11 +110,24 @@ class SpectrogramVideo(object):
                          utc_offset = utc_offset,
                          resolution = resolution,
                          units = units)
+        self.resolution = resolution
+
+        # Get the size of the axes.
+        ax = self.fig.axes[1]
+        bbox = ax.get_window_extent().transformed(self.fig.dpi_scale_trans.inverted())
+        width = bbox.width
+        self.ax_width = width * self.fig.dpi
         
         
     def make_frame(self, t):
         ''' Create a frame for a moviepy video.
         '''
+        # Check the animation flag.
+        # If no animation is requested return the cached image.
+        if not self.animate and self.cache is not None:
+            self.framecounter += 1
+            return self.cache
+        
         k = self.framecounter
         frame_times = self.frame_times
         tr = self.stream[0]
@@ -107,21 +135,44 @@ class SpectrogramVideo(object):
         # Handle eventual n_frames rounding problems.
         if k >= len(frame_times):
             k = len(frame_times) - 1
-            
-        self.spec_line.set_xdata(frame_times[k].matplotlib_date)
-        self.wf_line.set_xdata(frame_times[k].matplotlib_date)
-        self.time_box.txt.set_text(frame_times[k].strftime('%H:%M:%S'))
-        tr_progress = tr.copy().trim(endtime = frame_times[k])
-        self.wf_progress.set_xdata(tr_progress.times('matplotlib'))
-        self.wf_progress.set_ydata(tr_progress.data)
+
+        # Return the cached image if the playhead didn't move far enough.
+        # This speeds up rendering.
+        playhead_step = k * (self.ax_width / self.n_frames) - self.last_playhead_pos
+        thr = 20
+        if self.cache is not None and playhead_step <= thr:
+            self.framecounter += 1
+            return self.cache
+        else:
+            self.last_playhead_pos += playhead_step
+
+        if self.animate:
+            self.spec_line.set_xdata(frame_times[k].matplotlib_date)
+            self.wf_line.set_xdata(frame_times[k].matplotlib_date)
+            self.time_box.txt.set_text(frame_times[k].strftime('%H:%M:%S'))
+            tr_progress = tr.copy().trim(endtime = frame_times[k])
+            self.wf_progress.set_xdata(tr_progress.times('matplotlib'))
+            self.wf_progress.set_ydata(tr_progress.data)
+            self.last_playhead_pos += playhead_step
+        else:
+            self.spec_line.set_visible(False)
+            self.wf_line.set_visible(False)
+            self.time_box.set_visible(False)
+            self.wf_progress.set_visible(False)
+            self.wf_full.set(color = 'k')
         
         self.framecounter += 1
-        return mp_bind.mplfig_to_npimage(self.fig)
+        ret = mp_bind.mplfig_to_npimage(self.fig)
+        self.cache = ret
+        
+        return ret
 
     
-    def render_moviepy(self, fps = 20, duration = None):
+    def render_moviepy(self, fps = 20, animate = True,
+                       duration = None):
         ''' Render the animation using moviepy.
         '''
+        self.animate = animate
         tr = self.stream[0]
         tr_audio = self.audio_stream[0]
         
@@ -136,6 +187,7 @@ class SpectrogramVideo(object):
         frame_times = [tr.stats.starttime + x * delta_frame for x in range(n_frames)]
         frame_times = np.array(frame_times)
         self.frame_times = frame_times
+        self.n_frames = n_frames
 
         #print(n_frames)
         #print(len(frame_times))
@@ -158,6 +210,70 @@ class SpectrogramVideo(object):
 
         return animation
 
+
+    def render_mpl_new(self, out_filepath, fps = 10):
+        ''' Render the animation to a video.
+        '''
+        tr = self.stream[0]
+        tr_audio = self.audio_stream[0]
+        sps = tr.stats.sampling_rate
+
+        fig = self.fig
+        
+        # Compute the speed up factor.
+        seismo_dur = (tr.stats.endtime + tr.stats.delta) - tr.stats.starttime
+        audio_dur = (tr_audio.stats.endtime + tr_audio.stats.delta) - tr_audio.stats.starttime
+        speed_up_factor = seismo_dur / audio_dur
+
+        # Compute the times used for animation.
+        n_frames = int(audio_dur * fps)
+        delta_frame = speed_up_factor / fps
+        frame_times = [tr.stats.starttime + x * delta_frame for x in range(n_frames)]
+        frame_times = np.array(frame_times)
+           
+        # Create animation
+        
+        # interval = (tr.stats.delta * 1000) / speed_up_factor
+        interval = (1 / fps) * 1000
+        print(speed_up_factor)
+
+        def _init():
+            return (self.spec_line, self.wf_line, self.time_box, self.wf_progress)
+        
+        def _march_forward(frame):
+            ''' The animation update function.
+            '''
+            k = frame
+            spec_line = self.spec_line
+            wf_line = self.wf_line
+            time_box = self.time_box
+            wf_progress = self.wf_progress
+            spec_line.set_xdata(frame_times[k].matplotlib_date)
+            wf_line.set_xdata(frame_times[k].matplotlib_date)
+            time_box.txt.set_text(frame_times[k].strftime('%H:%M:%S'))
+            tr_progress = tr.copy().trim(endtime = frame_times[k])
+            wf_progress.set_xdata(tr_progress.times('matplotlib'))
+            wf_progress.set_ydata(tr_progress.data)
+            print('Finished frame ' + str(k))
+
+            return (spec_line, wf_line, time_box, wf_progress)
+           
+        animation = mpl.animation.FuncAnimation(fig,
+                                                func = _march_forward,
+                                                init_func = _init,
+                                                frames = frame_times.size,
+                                                interval = interval,
+                                                blit = True)
+
+        print('Saving animation. This may take a while...')
+        output_res = self.resolution_dict[self.resolution]
+        dpi = output_res[0] / self.fig_width
+        animation.save(out_filepath,
+                       dpi = dpi,
+                       progress_callback = lambda i, n: print(
+                        '{:d}/{:d} -- {:.1f}%'.format(i + 1, n, ((i + 1) / n) * 100), end='\r'))
+
+        
         
     def render_mpl(self, out_filepath, spec_win_length = 5, spec_win_overlap = 50, db_lim = 'smart', freq_min = None,
                freq_max = None, log_freq_scale = False, utc_offset = None,
@@ -248,20 +364,27 @@ class SpectrogramVideo(object):
             freq_max = tr.stats.sampling_rate / 2
         freq_lim = (freq_min, freq_max)
 
+        units = units.lower().strip()
         if units == 'm/s':
-            ylab = 'Velocity (m s$^{-1}$)'
+            ylab = 'vel.  [m s$^{-1}$]'
             ref_velocity = 1
             if ref_velocity == 1:
                 clab = (f'PSD (dB rel. {ref_velocity:g} [m s$^{{-1}}$]$^2$ Hz$^{{-1}}$)')
             else:
                 clab = (f'PSD (dB rel. [{ref_velocity:g} m s$^{{-1}}$]$^2$ Hz$^{{-1}}$)')
             ref_val = ref_velocity
+        elif units == 'pa':
+            ylab = 'Pressure [Pa]'
+            clab = 'PSD [dB]'
+            ref_val = 1
         elif units is None:
             ylab = 'unknown'
             clab = 'PSD [dB]'
+            ref_val = 1
         else:
             ylab = units
             clab = 'PSD [dB]'
+            ref_val = 1
 
         sps = tr.stats.sampling_rate
         nperseg = int(spec_win_length * sps)
@@ -295,8 +418,8 @@ class SpectrogramVideo(object):
         cax = fig.add_subplot(gs[0, 1])
 
         wf_lw = 0.5
-        wf_ax.plot(tr.times('matplotlib'), tr.data, '#b0b0b0',
-                   linewidth = wf_lw)
+        wf_full = wf_ax.plot(tr.times('matplotlib'), tr.data, '#b0b0b0',
+                             linewidth = wf_lw)
         wf_progress = wf_ax.plot(np.nan, np.nan, 'black', linewidth = wf_lw)[0]
         wf_ax.set_ylabel(ylab)
         wf_ax.grid(linestyle = ':')
@@ -308,7 +431,7 @@ class SpectrogramVideo(object):
                                 shading = 'nearest',
                                 rasterized = True)
 
-        spec_ax.set_ylabel('Frequency (Hz)')
+        spec_ax.set_ylabel('Frequency [Hz]')
         spec_ax.grid(linestyle=':')
         if log:
             spec_ax.set_yscale('log')
@@ -436,6 +559,7 @@ class SpectrogramVideo(object):
         self.spec_line = spec_line
         self.wf_line = wf_line
         self.time_box = time_box
+        self.wf_full = wf_full[0]
         self.wf_progress = wf_progress
 
 
