@@ -54,13 +54,14 @@ class SpeedUpSynth(object):
         self.audio_sps = audio_sps
 
 
-    def run(self):
+    def run(self, comp_ratio = 5):
         ''' Perform the audification.
         '''
         self.audio_stream = self.stream.copy()
         for cur_trace in self.audio_stream:
             self.speed_up(cur_trace)
-            self.adjust_dynamic_range(cur_trace)
+            self.adjust_dynamic_range(cur_trace,
+                                      ratio = comp_ratio)
 
 
     def speed_up(self, trace):
