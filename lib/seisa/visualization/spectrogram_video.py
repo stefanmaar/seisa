@@ -33,6 +33,8 @@ import numpy as np
 import scipy as sp
 import scipy.signal
 
+import seisa.util as util
+
 
 class SpectrogramVideo(object):
     ''' Spectrogram animation of a trace.
@@ -400,6 +402,29 @@ class SpectrogramVideo(object):
                        progress_callback = lambda i, n: print(
                         '{:d}/{:d} -- {:.1f}%'.format(i + 1, n, ((i + 1) / n) * 100), end='\r'))
 
+        
+    def compute_spectrogram(self, tr, win_length, win_overlap, nfft = None):
+        ''' Compute the spectrogram of the data.
+        
+        '''
+        sps = tr.stats.sampling_rate
+        n_perseg = int(win_length * sps)
+        n_overlap = np.floor(n_perseg * win_overlap / 100)
+
+        comp_nfft = util.next_power_of_2(int(n_perseg))
+        if nfft is None:
+            nfft = comp_nfft
+        if comp_nfft > nfft:
+            print("A larger nfft number would have be needed: {:d}.".format(comp_nfft))
+
+        f, t, sxx = sp.signal.spectrogram(tr.data, sps,
+                                          window = 'hann',
+                                          nperseg = n_perseg,
+                                          noverlap = n_overlap,
+                                          nfft = nfft)
+
+        return f, t, sxx
+    
 
     def spectrogram(self, tr, starttime, endtime,
                     spec_win_length = 5, spec_win_overlap = 50, db_lim = 'smart',
